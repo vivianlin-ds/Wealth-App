@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Wealth Allocation Tracker</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <h1>Wealth Allocation Tracker</h1>
+      </div>
+      <div class="tabs" role="tablist" aria-label="Page sections">
+        <button id="dashboardTabButton" type="button" class="tab-button active" role="tab" aria-selected="true">
+          Dashboard
+        </button>
+        <button id="dataTabButton" type="button" class="tab-button" role="tab" aria-selected="false">
+          Data Entry
+        </button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section id="dashboardPane" class="tab-pane" role="tabpanel" aria-labelledby="dashboardTabButton">
+        <div class="dashboard-controls">
+          <label>
+            Time Frame
+            <select id="timeFrame">
+              <option value="latest">Latest Month</option>
+              <option value="3">Last 3 Months</option>
+              <option value="6">Last 6 Months</option>
+              <option value="12">Last 12 Months</option>
+              <option value="all">All Months</option>
+            </select>
+          </label>
+          <label>
+            Distribution
+            <select id="allocationMetric">
+              <option value="currentValue">Current Value</option>
+              <option value="costBasis">Cost Basis</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="dashboard-grid">
+          <section class="panel summary-panel" aria-labelledby="summaryTitle">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Allocation</p>
+                <h2 id="summaryTitle">Dashboard</h2>
+              </div>
+            </div>
+
+            <div class="metric-row">
+              <div>
+                <span>Total Current Value</span>
+                <strong id="totalValue">$0</strong>
+              </div>
+              <div>
+                <span>Total Cost Basis</span>
+                <strong id="totalCost">$0</strong>
+              </div>
+              <div>
+                <span>Unrealized Gain/Loss</span>
+                <strong id="totalGain">$0</strong>
+              </div>
+              <div>
+                <span>Months Tracked</span>
+                <strong id="monthsTracked">0</strong>
+              </div>
+            </div>
+
+            <div id="allocationBars" class="allocation-bars" aria-live="polite"></div>
+          </section>
+
+          <section class="panel summary-panel" aria-labelledby="allAssetsTitle">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">All Assets</p>
+                <h2 id="allAssetsTitle">Complete Allocation</h2>
+              </div>
+            </div>
+            <div class="metric-row compact">
+              <div>
+                <span>Total Current Value</span>
+                <strong id="allAssetsTotalValue">$0</strong>
+              </div>
+              <div>
+                <span>Months Tracked</span>
+                <strong id="allAssetsMonthsTracked">0</strong>
+              </div>
+            </div>
+            <div id="allAssetsBars" class="allocation-bars" aria-live="polite"></div>
+          </section>
+
+          <section class="panel summary-panel secondary-summary retirement-panel" aria-labelledby="retirementTitle">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Retirement</p>
+                <h2 id="retirementTitle">401k, Roth, HSA</h2>
+              </div>
+            </div>
+            <div class="metric-row compact">
+              <div>
+                <span>Total Current Value</span>
+                <strong id="retirementTotalValue">$0</strong>
+              </div>
+              <div>
+                <span>Months Tracked</span>
+                <strong id="retirementMonthsTracked">0</strong>
+              </div>
+            </div>
+            <div id="retirementBars" class="allocation-bars" aria-live="polite"></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="dataPane" class="tab-pane hidden" role="tabpanel" aria-labelledby="dataTabButton">
+        <section class="panel entry-panel" aria-labelledby="entryTitle">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Monthly update</p>
+              <h2 id="entryTitle">Add or Update Holding</h2>
+            </div>
+
+            <button id="addNewAsset" type="button" class="icon-button" title="Add new as
+         set">Add New Asset</button>
+            </div>
+            
+            <form id="holdingForm" autocomplete="off">
+              <input id="editingId" type="hidden" />
+              <div class="form-grid">
+                <label>
+                  Month
+                  <input id="month" type="month" required />
+                </label>
+                <label id="assetSelectLabel">
+                  Existing Asset
+                  <select id="assetSelect"></select>
+                </label>
+                <label>
+                  Institution
+                  <select id="institution" required></select>
+                </label>
+                <label>
+                  Category
+                  <select id="category" required></select>
+                </label>
+                <label>
+                  Ticker/Product
+                  <input id="ticker" type="text" placeholder="VTI, HYSA, CD 12mo" />
+                </label>
+                <label>
+                  Current Value
+                  <input id="currentValue" type="number" min="0" step="0.01" inputmode="decimal" required />
+                </label>
+              </div>
+              <div id="accountMovementPanel" class="movement-panel hidden">
+                <div>
+                  <span>Previous Balance</span>
+                  <strong id="previousBalance">$0</strong>
+                  <label>
+                    Movement
+                    <select id="movementType">
+                      <option value="set">Set Balance</option>
+                      <option value="add">Add Money</option>
+                      <option value="withdraw">Withdraw Money</option>
+                    </select>
+                  </label>
+                  <label id="movementAmountLabel" class="hidden">
+                    Amount
+                    <input id="movementAmount" type="number" min="0" step="0.01" inputmode="decimal" />
+                  </label>
+                </div>
+                <label class="checkbox-label">
+                  <input id="currentValueIsUnrealizedGain" type="checkbox" />
+                  Current Value is unrealized gain
+                </label>
+                <label class="checkbox-label">
+                  <input id="sold" type="checkbox" />
+                  Matured/Sold
+                </label>
+                <label>
+                  Cost Basis
+                  <input id="costBasis" type="number" min="0" step="0.01" inputmode="decimal" />
+                </label>
+              </div>
+              <label>
+                Notes
+                <textarea id="notes" rows="3" placeholder="Optional context for this month"></textarea>
+              </label>
+              <button type="submit" class="primary">Save Holding</button>
+            </form>
+          </section>
+
+          <section class="panel table-panel" aria-labelledby="tableTitle">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Records</p>
+                <h2 id="tableTitle">Monthly Holdings</h2>
+              </div>
+              <div class="record-filters">
+                <label>
+                  Month
+                  <select id="recordMonthFilter"></select>
+                </label>
+                <label>
+                  Institution
+                  <select id="recordInstitutionFilter"></select>
+                </label>
+                <label>
+                  Category
+                  <select id="recordCategoryFilter"></select>
+                </label>
+                <label>
+                  Ticker/Product
+                  <select id="recordTickerFilter"></select>
+                </label>
+                <label class="search-box">
+                  Search
+                  <input id="search" type="search" placeholder="Notes, value type, status" />
+                </label>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Month</th>
+                    <th>Institution</th>
+                    <th>Category</th>
+                    <th>Ticker/Product</th>
+                    <th class="number">Current Value</th>
+                    <th>Value Type</th>
+                    <th>Matured/Sold</th>
+                    <th class="number">Cost Basis</th>
+                    <th>Notes</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="holdingsTable"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <template id="emptyState">
+      <div class="empty-state">
+        <h3>No entries yet</h3>
+        <p>Add this month’s holdings to see allocation percentages.</p>
+      </div>
+    </template>
+
+    <script src="dist/app.js"></script>
+  </body>
+</html>
