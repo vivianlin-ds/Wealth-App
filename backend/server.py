@@ -16,12 +16,12 @@ DB_PATH = DATA_DIR / "wealth.db"
 INSTITUTION_CATEGORIES = {
     "Wealthfront": {"High yield saving"},
     "Charles Schwab": {"Cash", "ETF", "Mutual Fund", "CD"},
-    "Fidelity": {"401k", "Roth"},
-    "Alight": {"HSA"},
+    "Fidelity": {"401k", "Roth", "Roth Investment"},
+    "Alight": {"HSA", "HSA Investment"},
 }
 CATEGORIES = {category for categories in INSTITUTION_CATEGORIES.values() for category in categories}
 ACCOUNT_STYLE_CATEGORIES = {"High yield saving", "Cash", "401k", "Roth", "HSA"}
-NO_COST_BASIS_CATEGORIES = {"High yield saving", "Cash", "401k", "Roth", "HSA"}
+NO_COST_BASIS_CATEGORIES: set[str] = set()
 
 
 class AppError(Exception):
@@ -118,9 +118,6 @@ def validate_payload(payload: dict[str, Any], existing_id: str | None = None) ->
         raise AppError(HTTPStatus.BAD_REQUEST, "Current value cannot be negative.")
     if cost_basis < 0:
         raise AppError(HTTPStatus.BAD_REQUEST, "Cost basis cannot be negative.")
-    if category in NO_COST_BASIS_CATEGORIES:
-        cost_basis = 0
-
     asset = generate_asset_key(institution, category, ticker, cost_basis)
     timestamp = now_iso()
     return {

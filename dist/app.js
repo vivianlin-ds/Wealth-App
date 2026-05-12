@@ -2,15 +2,16 @@
 const INSTITUTION_CATEGORIES = {
     Wealthfront: ["High yield saving"],
     "Charles Schwab": ["Cash", "ETF", "Mutual Fund", "CD"],
-    Fidelity: ["401k", "Roth"],
-    Alight: ["HSA"],
+    Fidelity: ["401k", "Roth", "Roth Investment"],
+    Alight: ["HSA", "HSA Investment"],
 };
 const INSTITUTIONS = Object.keys(INSTITUTION_CATEGORIES);
 const DEFAULT_INSTITUTION = "Charles Schwab";
 const ACCOUNT_STYLE_CATEGORIES = ["High yield saving", "Cash", "401k", "Roth", "HSA"];
-const MOVEMENT_CATEGORIES = ["High yield saving", "Cash", "401k", "HSA"];
-const NO_COST_BASIS_CATEGORIES = ["High yield saving", "Cash", "401k", "Roth", "HSA"];
-const RETIREMENT_CATEGORIES = ["401k", "Roth", "HSA"];
+const MOVEMENT_CATEGORIES = ["High yield saving", "Cash", "401k", "Roth", "HSA"];
+const NO_COST_BASIS_CATEGORIES = [];
+const RETIREMENT_CATEGORIES = ["401k", "Roth", "Roth Investment", "HSA", "HSA Investment"];
+const NON_RETIREMENT_SUMMARY_CATEGORIES = ["High yield saving", "Cash", "CD", "ETF"];
 const state = {
     holdings: [],
     formMode: "new",
@@ -52,9 +53,13 @@ const elements = {
     monthsTracked: getElement("monthsTracked"),
     allocationBars: getElement("allocationBars"),
     allAssetsTotalValue: getElement("allAssetsTotalValue"),
+    allAssetsTotalCost: getElement("allAssetsTotalCost"),
+    allAssetsTotalGain: getElement("allAssetsTotalGain"),
     allAssetsMonthsTracked: getElement("allAssetsMonthsTracked"),
     allAssetsBars: getElement("allAssetsBars"),
     retirementTotalValue: getElement("retirementTotalValue"),
+    retirementTotalCost: getElement("retirementTotalCost"),
+    retirementTotalGain: getElement("retirementTotalGain"),
     retirementMonthsTracked: getElement("retirementMonthsTracked"),
     retirementBars: getElement("retirementBars"),
     table: getElement("holdingsTable"),
@@ -146,7 +151,7 @@ async function saveHolding(event) {
         currentValue: Number(elements.currentValue.value || 0),
         currentValueIsUnrealizedGain: elements.currentValueIsUnrealizedGain.checked,
         sold: elements.sold.checked,
-        costBasis: isNoCostBasisCategory(elements.category.value) ? 0 : Number(elements.costBasis.value || 0),
+        costBasis: Number(elements.costBasis.value || 0),
         notes: elements.notes.value.trim(),
     };
     if (payload.sold) {
@@ -263,7 +268,7 @@ function setFormMode(mode) {
     elements.institution.disabled = useExisting;
     elements.category.disabled = useExisting;
     elements.ticker.readOnly = useExisting;
-    elements.costBasis.readOnly = useExisting;
+    elements.costBasis.readOnly = false;
     elements.notes.readOnly = useExisting;
     elements.assetSelect.disabled = isEdit;
     if (!useExisting) {
@@ -297,8 +302,9 @@ function prefillSelectedAsset() {
     populateCategories(holding.category);
     elements.ticker.value = holding.ticker;
     elements.currentValue.value = "";
-    elements.costBasis.value = isNoCostBasisCategory(holding.category) ? "" : String(holding.costBasis || 0);
+    elements.costBasis.value = String(holding.costBasis || 0);
     updateCostBasisVisibility(holding.category);
+    elements.costBasis.readOnly = false;
     elements.currentValueIsUnrealizedGain.checked = holding.currentValueIsUnrealizedGain;
     elements.sold.checked = false;
     updateCurrentValueBounds();
@@ -405,19 +411,17 @@ function uniqueTickers(holdings) {
     return [...new Set(holdings.map((holding) => holding.ticker || ""))].sort((a, b) => a.localeCompare(b));
 }
 function renderSummary(holdings) {
-    const allocationHoldings = holdings.filter((holding) => !isRetirementCategory(holding.category));
-    const totalValue = sum(allocationHoldings, "currentValue");
-    const holdingsWithBasis = allocationHoldings.filter((holding) => !isNoCostBasisCategory(holding.category));
-    const totalCost = sum(holdingsWithBasis, "costBasis");
-    const gain = sum(holdingsWithBasis, "currentValue") - totalCost;
+    const allocationHoldings = holdings.filter((holding) => isNonRetirementSummaryCategory(holding.category));
     const metric = elements.allocationMetric.value;
     const groups = groupHoldings(allocationHoldings, "category", metric);
     const allocationTotal = groups.reduce((total, group) => total + group.value, 0);
-    elements.totalValue.textContent = currency.format(totalValue);
-    elements.totalCost.textContent = currency.format(totalCost);
-    elements.totalGain.textContent = currency.format(gain);
-    elements.totalGain.style.color = gain < 0 ? "var(--danger)" : "var(--primary)";
-    elements.monthsTracked.textContent = String(uniqueMonths(allocationHoldings).length);
+    renderMetricRow({
+        holdings: allocationHoldings,
+        totalValue: elements.totalValue,
+        totalCost: elements.totalCost,
+        totalGain: elements.totalGain,
+        monthsTracked: elements.monthsTracked,
+    });
     if (!allocationHoldings.length || !groups.length) {
         elements.allocationBars.innerHTML = elements.emptyState.innerHTML;
         return;
@@ -442,12 +446,16 @@ function renderSummary(holdings) {
         .join("");
 }
 function renderAllAssets(holdings) {
-    const totalValue = sum(holdings, "currentValue");
     const metric = elements.allocationMetric.value;
     const groups = groupHoldings(holdings, "category", metric);
     const allocationTotal = groups.reduce((total, group) => total + group.value, 0);
-    elements.allAssetsTotalValue.textContent = currency.format(totalValue);
-    elements.allAssetsMonthsTracked.textContent = String(uniqueMonths(holdings).length);
+    renderMetricRow({
+        holdings,
+        totalValue: elements.allAssetsTotalValue,
+        totalCost: elements.allAssetsTotalCost,
+        totalGain: elements.allAssetsTotalGain,
+        monthsTracked: elements.allAssetsMonthsTracked,
+    });
     if (!holdings.length || !groups.length) {
         elements.allAssetsBars.innerHTML = elements.emptyState.innerHTML;
         return;
@@ -474,8 +482,13 @@ function renderAllAssets(holdings) {
 function renderRetirement(holdings) {
     const groups = groupHoldings(holdings, "category", "currentValue");
     const allocationTotal = groups.reduce((total, group) => total + group.value, 0);
-    elements.retirementTotalValue.textContent = currency.format(sum(holdings, "currentValue"));
-    elements.retirementMonthsTracked.textContent = String(uniqueMonths(holdings).length);
+    renderMetricRow({
+        holdings,
+        totalValue: elements.retirementTotalValue,
+        totalCost: elements.retirementTotalCost,
+        totalGain: elements.retirementTotalGain,
+        monthsTracked: elements.retirementMonthsTracked,
+    });
     if (!holdings.length || !groups.length) {
         elements.retirementBars.innerHTML = elements.emptyState.innerHTML;
         return;
@@ -519,7 +532,7 @@ function renderTable(holdings) {
           <td class="number">${preciseCurrency.format(holding.currentValue)}</td>
           <td>${holding.currentValueIsUnrealizedGain ? "Unrealized Gain" : "Current Value"}</td>
           <td>${holding.sold ? "Yes" : "No"}</td>
-          <td class="number">${isNoCostBasisCategory(holding.category) ? "-" : preciseCurrency.format(holding.costBasis || 0)}</td>
+          <td class="number">${preciseCurrency.format(holding.costBasis || 0)}</td>
           <td>${escapeHtml(holding.notes || "-")}</td>
           <td>
             <div class="actions">
@@ -553,9 +566,10 @@ async function handleTableAction(event) {
         elements.currentValueIsUnrealizedGain.checked = holding.currentValueIsUnrealizedGain;
         elements.sold.checked = holding.sold;
         updateCurrentValueBounds();
-        hideAccountMovement();
-        elements.costBasis.value = isNoCostBasisCategory(holding.category) ? "" : String(holding.costBasis);
+        elements.costBasis.value = String(holding.costBasis || 0);
         updateCostBasisVisibility(holding.category);
+        elements.costBasis.readOnly = false;
+        setupAccountMovement(holding);
         elements.notes.value = holding.notes;
         elements.institution.focus();
     }
@@ -603,6 +617,15 @@ function uniqueMonths(holdings) {
 function sum(holdings, key) {
     return holdings.reduce((total, holding) => total + Number(holding[key] || 0), 0);
 }
+function renderMetricRow({ holdings, totalValue, totalCost, totalGain, monthsTracked, }) {
+    const cost = sum(holdings, "costBasis");
+    const gain = sum(holdings, "currentValue") - cost;
+    totalValue.textContent = currency.format(sum(holdings, "currentValue"));
+    totalCost.textContent = currency.format(cost);
+    totalGain.textContent = currency.format(gain);
+    totalGain.style.color = gain < 0 ? "var(--danger)" : "var(--primary)";
+    monthsTracked.textContent = String(uniqueMonths(holdings).length);
+}
 function sortByMonthDesc(a, b) {
     return b.month.localeCompare(a.month) || a.institution.localeCompare(b.institution);
 }
@@ -628,11 +651,11 @@ function isNoCostBasisCategory(category) {
 function isRetirementCategory(category) {
     return RETIREMENT_CATEGORIES.includes(category);
 }
+function isNonRetirementSummaryCategory(category) {
+    return NON_RETIREMENT_SUMMARY_CATEGORIES.includes(category);
+}
 function updateCostBasisVisibility(category) {
-    elements.costBasis.closest("label")?.classList.toggle("hidden", isNoCostBasisCategory(category));
-    if (isNoCostBasisCategory(category)) {
-        elements.costBasis.value = "";
-    }
+    elements.costBasis.closest("label")?.classList.remove("hidden");
 }
 function updateCurrentValueBounds() {
     if (elements.currentValueIsUnrealizedGain.checked) {
@@ -648,7 +671,7 @@ function updateSoldState() {
     updateCurrentValueBounds();
 }
 function setupAccountMovement(holding) {
-    if (!isMovementCategory(holding.category) || state.formMode !== "existing") {
+    if (!isMovementCategory(holding.category) || !["existing", "edit"].includes(state.formMode)) {
         hideAccountMovement();
         return;
     }
@@ -681,7 +704,7 @@ function updateMovementAmount() {
     if (movement === "set") {
         return;
     }
-    const holding = state.holdings.find((item) => item.id === elements.assetSelect.value);
+    const holding = movementBaseHolding();
     if (!holding)
         return;
     const amount = Number(elements.movementAmount.value || 0);
@@ -696,6 +719,10 @@ function syncSetBalanceAmount() {
 }
 function isMovementCategory(category) {
     return MOVEMENT_CATEGORIES.includes(category);
+}
+function movementBaseHolding() {
+    const id = state.formMode === "edit" ? elements.editingId.value : elements.assetSelect.value;
+    return state.holdings.find((item) => item.id === id);
 }
 function keyPart(value) {
     return value.trim().replace(/\s+/g, "-").replace(/_+/g, "-") || "None";

@@ -152,14 +152,14 @@ h2 {
   box-shadow: var(--shadow), var(--glow);
 }
 
-.secondary-summary {
-  grid-column: 1 / -1;
-}
-
 .dashboard-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 20px;
+}
+
+.full-width-summary {
+  grid-column: 1 / -1;
 }
 
 .dashboard-controls {
@@ -175,10 +175,6 @@ h2 {
 
 .dashboard-controls label {
   min-width: 180px;
-}
-
-.retirement-panel {
-  grid-column: 1 / -1;
 }
 
 .tab-pane {
@@ -342,6 +338,9 @@ textarea[readonly] {
 }
 
 .metric-row > div {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
   min-height: 86px;
   padding: 14px;
   border: 1px solid var(--line);
@@ -353,9 +352,12 @@ textarea[readonly] {
 
 .metric-row span {
   display: block;
+  min-height: 2.1em;
   color: var(--muted);
   font-size: 0.78rem;
   font-weight: 800;
+  line-height: 1.35;
+  text-align: left;
 }
 
 .metric-row strong {
@@ -365,6 +367,9 @@ textarea[readonly] {
   line-height: 1.15;
   overflow-wrap: anywhere;
   color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+  text-align: right;
 }
 
 .allocation-bars {

@@ -47,8 +47,8 @@
           <section class="panel summary-panel" aria-labelledby="summaryTitle">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">Allocation</p>
-                <h2 id="summaryTitle">Dashboard</h2>
+                <p class="eyebrow">Non-Retirement</p>
+                <h2 id="summaryTitle">Current Allocation</h2>
               </div>
             </div>
 
@@ -74,37 +74,25 @@
             <div id="allocationBars" class="allocation-bars" aria-live="polite"></div>
           </section>
 
-          <section class="panel summary-panel" aria-labelledby="allAssetsTitle">
-            <div class="panel-heading">
-              <div>
-                <p class="eyebrow">All Assets</p>
-                <h2 id="allAssetsTitle">Complete Allocation</h2>
-              </div>
-            </div>
-            <div class="metric-row compact">
-              <div>
-                <span>Total Current Value</span>
-                <strong id="allAssetsTotalValue">$0</strong>
-              </div>
-              <div>
-                <span>Months Tracked</span>
-                <strong id="allAssetsMonthsTracked">0</strong>
-              </div>
-            </div>
-            <div id="allAssetsBars" class="allocation-bars" aria-live="polite"></div>
-          </section>
-
-          <section class="panel summary-panel secondary-summary retirement-panel" aria-labelledby="retirementTitle">
+          <section class="panel summary-panel" aria-labelledby="retirementTitle">
             <div class="panel-heading">
               <div>
                 <p class="eyebrow">Retirement</p>
                 <h2 id="retirementTitle">401k, Roth, HSA</h2>
               </div>
             </div>
-            <div class="metric-row compact">
+            <div class="metric-row">
               <div>
                 <span>Total Current Value</span>
                 <strong id="retirementTotalValue">$0</strong>
+              </div>
+              <div>
+                <span>Total Cost Basis</span>
+                <strong id="retirementTotalCost">$0</strong>
+              </div>
+              <div>
+                <span>Unrealized Gain/Loss</span>
+                <strong id="retirementTotalGain">$0</strong>
               </div>
               <div>
                 <span>Months Tracked</span>
@@ -112,6 +100,34 @@
               </div>
             </div>
             <div id="retirementBars" class="allocation-bars" aria-live="polite"></div>
+          </section>
+
+          <section class="panel summary-panel secondary-summary full-width-summary" aria-labelledby="allAssetsTitle">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">All Assets</p>
+                <h2 id="allAssetsTitle">Complete Allocation</h2>
+              </div>
+            </div>
+            <div class="metric-row">
+              <div>
+                <span>Total Current Value</span>
+                <strong id="allAssetsTotalValue">$0</strong>
+              </div>
+              <div>
+                <span>Total Cost Basis</span>
+                <strong id="allAssetsTotalCost">$0</strong>
+              </div>
+              <div>
+                <span>Unrealized Gain/Loss</span>
+                <strong id="allAssetsTotalGain">$0</strong>
+              </div>
+              <div>
+                <span>Months Tracked</span>
+                <strong id="allAssetsMonthsTracked">0</strong>
+              </div>
+            </div>
+            <div id="allAssetsBars" class="allocation-bars" aria-live="polite"></div>
           </section>
         </div>
       </section>
@@ -155,6 +171,10 @@
                   Current Value
                   <input id="currentValue" type="number" min="0" step="0.01" inputmode="decimal" required />
                 </label>
+                <label>
+                  Cost Basis
+                  <input id="costBasis" type="number" min="0" step="0.01" inputmode="decimal" />
+                </label>
               </div>
               <div id="accountMovementPanel" class="movement-panel hidden">
                 <div>
@@ -180,10 +200,6 @@
                 <label class="checkbox-label">
                   <input id="sold" type="checkbox" />
                   Matured/Sold
-                </label>
-                <label>
-                  Cost Basis
-                  <input id="costBasis" type="number" min="0" step="0.01" inputmode="decimal" />
                 </label>
               </div>
               <label>

@@ -37,7 +37,7 @@ npm run build
 - Current Value
 - Whether Current Value was entered as unrealized gain
 - Whether a Charles Schwab ETF, mutual fund, or CD was matured/sold
-- Cost Basis, not used for High yield saving, Cash, 401k, Roth, or HSA
+- Cost Basis, optional for every asset/category
 - Notes
 - Month
 
@@ -45,16 +45,18 @@ Supported institution/category combinations:
 
 - Wealthfront: High yield saving
 - Charles Schwab: Cash, ETF, Mutual Fund, CD
-- Fidelity: 401k, Roth
-- Alight: HSA
+- Fidelity: 401k, Roth, Roth Investment
+- Alight: HSA, HSA Investment
 
 Account-style categories use one stable asset key even when money is added or withdrawn: High yield saving, Cash, 401k, Roth, HSA.
-Investment-style categories include Cost Basis in the asset key: ETF, Mutual Fund, CD.
+Investment-style categories include Cost Basis in the asset key: ETF, Mutual Fund, CD, Roth Investment, HSA Investment.
 
-High yield saving, Cash, 401k, Roth, and HSA are excluded from Total Cost Basis and Unrealized Gain/Loss calculations.
-The main Allocation dashboard excludes 401k, Roth, and HSA and shows them in a separate Retirement view.
+Cost Basis is included in Total Cost Basis and Unrealized Gain/Loss calculations when the category is part of the current dashboard view.
+The Non-Retirement dashboard summarizes High yield saving, Cash, CD, and ETF categories.
+The All Assets dashboard summarizes every category.
+The Retirement dashboard summarizes 401k, Roth, Roth Investment, HSA, and HSA Investment categories.
 
-For existing High yield saving, Cash, 401k, and HSA assets, the form includes an account movement UI:
+For existing High yield saving, Cash, 401k, Roth, and HSA assets, the form includes an account movement UI:
 set the new balance directly, add money to the previous balance, or withdraw money from the previous balance.
 
 ## Sold Assets
