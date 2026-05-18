@@ -15,7 +15,7 @@ DATA_DIR = ROOT / "local-data"
 DB_PATH = DATA_DIR / "wealth.db"
 INSTITUTION_CATEGORIES = {
     "Wealthfront": {"High yield saving"},
-    "Charles Schwab": {"Cash", "ETF", "Mutual Fund", "CD"},
+    "Charles Schwab": {"Cash", "ETF", "Mutual Fund", "CD", "Equities"},
     "Fidelity": {"401k", "Roth", "Roth Investment"},
     "Alight": {"HSA", "HSA Investment"},
 }
@@ -60,6 +60,25 @@ def init_db() -> None:
             "INTEGER NOT NULL DEFAULT 0",
         )
         ensure_column(conn, "holdings", "sold", "INTEGER NOT NULL DEFAULT 0")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS records (
+                id TEXT PRIMARY KEY,
+                month TEXT NOT NULL,
+                action TEXT NOT NULL,
+                institution TEXT NOT NULL,
+                category TEXT NOT NULL,
+                ticker TEXT NOT NULL DEFAULT '',
+                amount REAL NOT NULL DEFAULT 0,
+                cash_delta REAL NOT NULL DEFAULT 0,
+                notes TEXT NOT NULL DEFAULT '',
+                holding_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        normalize_schwab_cash_rows(conn)
+        backfill_records(conn)
 
 
 def connect() -> sqlite3.Connection:
@@ -90,6 +109,22 @@ def row_to_holding(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def row_to_record(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "month": row["month"],
+        "action": row["action"],
+        "institution": row["institution"],
+        "category": row["category"],
+        "ticker": row["ticker"],
+        "amount": row["amount"],
+        "cashDelta": row["cash_delta"],
+        "notes": row["notes"],
+        "holdingId": row["holding_id"],
+        "createdAt": row["created_at"],
+    }
+
+
 def validate_payload(payload: dict[str, Any], existing_id: str | None = None) -> dict[str, Any]:
     month = str(payload.get("month", "")).strip()
     institution = str(payload.get("institution", "")).strip()
@@ -107,6 +142,8 @@ def validate_payload(payload: dict[str, Any], existing_id: str | None = None) ->
         raise AppError(HTTPStatus.BAD_REQUEST, "Category is not supported.")
     if category not in INSTITUTION_CATEGORIES[institution]:
         raise AppError(HTTPStatus.BAD_REQUEST, "Category is not supported for this institution.")
+    if is_plain_cash_asset(institution, category):
+        ticker = ""
 
     try:
       current_value = float(payload.get("currentValue", 0))
@@ -114,7 +151,7 @@ def validate_payload(payload: dict[str, Any], existing_id: str | None = None) ->
     except (TypeError, ValueError):
         raise AppError(HTTPStatus.BAD_REQUEST, "Current value and cost basis must be numbers.")
 
-    if current_value < 0 and not current_value_is_unrealized_gain:
+    if current_value < 0 and not current_value_is_unrealized_gain and not is_plain_cash_asset(institution, category):
         raise AppError(HTTPStatus.BAD_REQUEST, "Current value cannot be negative.")
     if cost_basis < 0:
         raise AppError(HTTPStatus.BAD_REQUEST, "Cost basis cannot be negative.")
@@ -137,6 +174,8 @@ def validate_payload(payload: dict[str, Any], existing_id: str | None = None) ->
 
 
 def generate_asset_key(institution: str, category: str, ticker: str, cost_basis: float) -> str:
+    if is_plain_cash_asset(institution, category):
+        ticker = ""
     if category in ACCOUNT_STYLE_CATEGORIES:
         parts = [institution, category, ticker or "No ticker"]
     else:
@@ -155,6 +194,73 @@ def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
+def is_plain_cash_asset(institution: str, category: str) -> bool:
+    return institution == "Charles Schwab" and category == "Cash"
+
+
+def normalize_schwab_cash_rows(conn: sqlite3.Connection) -> None:
+    cash_asset = generate_asset_key("Charles Schwab", "Cash", "", 0)
+    timestamp = now_iso()
+    conn.execute(
+        """
+        UPDATE holdings
+        SET asset = ?,
+            ticker = '',
+            updated_at = ?
+        WHERE institution = 'Charles Schwab'
+          AND category = 'Cash'
+          AND (asset != ? OR ticker != '')
+        """,
+        (cash_asset, timestamp, cash_asset),
+    )
+    duplicate_months = conn.execute(
+        """
+        SELECT month
+        FROM holdings
+        WHERE institution = 'Charles Schwab'
+          AND category = 'Cash'
+        GROUP BY month
+        HAVING COUNT(*) > 1
+        """
+    ).fetchall()
+    for duplicate_month in duplicate_months:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM holdings
+            WHERE institution = 'Charles Schwab'
+              AND category = 'Cash'
+              AND month = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (duplicate_month["month"],),
+        ).fetchall()
+        keeper = rows[0]
+        duplicate_ids = [row["id"] for row in rows[1:]]
+        notes = [row["notes"] for row in rows if row["notes"]]
+        conn.execute(
+            """
+            UPDATE holdings
+            SET current_value = ?,
+                cost_basis = 0,
+                ticker = '',
+                asset = ?,
+                notes = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                sum(float(row["current_value"] or 0) for row in rows),
+                cash_asset,
+                " ".join(notes),
+                timestamp,
+                keeper["id"],
+            ),
+        )
+        placeholders = ",".join("?" for _ in duplicate_ids)
+        conn.execute(f"DELETE FROM holdings WHERE id IN ({placeholders})", duplicate_ids)
+
+
 def list_holdings() -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute(
@@ -164,6 +270,98 @@ def list_holdings() -> list[dict[str, Any]]:
             """
         ).fetchall()
     return [row_to_holding(row) for row in rows]
+
+
+def list_records() -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM records
+            ORDER BY created_at DESC, id DESC
+            """
+        ).fetchall()
+    return [row_to_record(row) for row in rows]
+
+
+def create_record(payload: dict[str, Any]) -> dict[str, Any]:
+    month = str(payload.get("month", "")).strip()
+    action = str(payload.get("action", "")).strip()
+    institution = str(payload.get("institution", "")).strip()
+    category = str(payload.get("category", "")).strip()
+    ticker = str(payload.get("ticker", "")).strip()
+    notes = str(payload.get("notes", "")).strip()
+    holding_id = str(payload.get("holdingId", "")).strip()
+
+    if len(month) != 7 or month[4] != "-":
+        raise AppError(HTTPStatus.BAD_REQUEST, "Month must use YYYY-MM format.")
+    if not action:
+        raise AppError(HTTPStatus.BAD_REQUEST, "Record action is required.")
+    if institution not in INSTITUTION_CATEGORIES:
+        raise AppError(HTTPStatus.BAD_REQUEST, "Institution is not supported.")
+    if category not in CATEGORIES:
+        raise AppError(HTTPStatus.BAD_REQUEST, "Category is not supported.")
+    if category not in INSTITUTION_CATEGORIES[institution]:
+        raise AppError(HTTPStatus.BAD_REQUEST, "Category is not supported for this institution.")
+
+    try:
+        amount = float(payload.get("amount", 0) or 0)
+        cash_delta = float(payload.get("cashDelta", 0) or 0)
+    except (TypeError, ValueError):
+        raise AppError(HTTPStatus.BAD_REQUEST, "Record amount and cash delta must be numbers.")
+
+    record_id = str(uuid.uuid4())
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO records (
+                id, month, action, institution, category, ticker,
+                amount, cash_delta, notes, holding_id, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (record_id, month, action, institution, category, ticker, amount, cash_delta, notes, holding_id, now_iso()),
+        )
+    return get_record(record_id)
+
+
+def get_record(record_id: str) -> dict[str, Any]:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM records WHERE id = ?", (record_id,)).fetchone()
+    if row is None:
+        raise AppError(HTTPStatus.NOT_FOUND, "Record not found.")
+    return row_to_record(row)
+
+
+def backfill_records(conn: sqlite3.Connection) -> None:
+    existing = conn.execute("SELECT COUNT(*) AS count FROM records").fetchone()["count"]
+    if existing:
+        return
+    rows = conn.execute("SELECT * FROM holdings ORDER BY created_at ASC, id ASC").fetchall()
+    for row in rows:
+        action = "Cash balance" if is_plain_cash_asset(row["institution"], row["category"]) else "Holding entry"
+        cash_delta = float(row["current_value"] or 0) if is_plain_cash_asset(row["institution"], row["category"]) else 0
+        conn.execute(
+            """
+            INSERT INTO records (
+                id, month, action, institution, category, ticker,
+                amount, cash_delta, notes, holding_id, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                row["month"],
+                action,
+                row["institution"],
+                row["category"],
+                row["ticker"],
+                float(row["current_value"] or 0),
+                cash_delta,
+                row["notes"],
+                row["id"],
+                row["created_at"],
+            ),
+        )
 
 
 def create_holding(payload: dict[str, Any]) -> dict[str, Any]:
@@ -236,6 +434,9 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/holdings":
             self.send_json({"holdings": list_holdings()})
             return
+        if parsed.path == "/api/records":
+            self.send_json({"records": list_records()})
+            return
         if parsed.path == "/":
             self.path = "/index.html"
         super().do_GET()
@@ -245,6 +446,9 @@ class Handler(SimpleHTTPRequestHandler):
             parsed = urlparse(self.path)
             if parsed.path == "/api/holdings":
                 self.send_json(create_holding(self.read_json()), HTTPStatus.CREATED)
+                return
+            if parsed.path == "/api/records":
+                self.send_json(create_record(self.read_json()), HTTPStatus.CREATED)
                 return
             raise AppError(HTTPStatus.NOT_FOUND, "Route not found.")
         except AppError as error:

@@ -1,7 +1,7 @@
 "use strict";
 const INSTITUTION_CATEGORIES = {
     Wealthfront: ["High yield saving"],
-    "Charles Schwab": ["Cash", "ETF", "Mutual Fund", "CD"],
+    "Charles Schwab": ["Cash", "ETF", "Mutual Fund", "CD", "Equities"],
     Fidelity: ["401k", "Roth", "Roth Investment"],
     Alight: ["HSA", "HSA Investment"],
 };
@@ -11,9 +11,14 @@ const ACCOUNT_STYLE_CATEGORIES = ["High yield saving", "Cash", "401k", "Roth", "
 const MOVEMENT_CATEGORIES = ["High yield saving", "Cash", "401k", "Roth", "HSA"];
 const NO_COST_BASIS_CATEGORIES = [];
 const RETIREMENT_CATEGORIES = ["401k", "Roth", "Roth Investment", "HSA", "HSA Investment"];
-const NON_RETIREMENT_SUMMARY_CATEGORIES = ["High yield saving", "Cash", "CD", "ETF"];
+const NON_RETIREMENT_SUMMARY_CATEGORIES = ["High yield saving", "Cash", "CD", "ETF", "Equities"];
+const CASH_TRANSFER_ACCOUNTS = [
+    { institution: "Charles Schwab", category: "Cash", ticker: "", label: "Charles Schwab - Cash" },
+    { institution: "Wealthfront", category: "High yield saving", ticker: "HYSA", label: "Wealthfront - High yield saving" },
+];
 const state = {
     holdings: [],
+    records: [],
     formMode: "new",
 };
 const elements = {
@@ -22,6 +27,8 @@ const elements = {
     dashboardPane: getElement("dashboardPane"),
     dataPane: getElement("dataPane"),
     form: getElement("holdingForm"),
+    transferPanel: getElement("transferPanel"),
+    transferForm: getElement("transferForm"),
     editingId: getElement("editingId"),
     month: getElement("month"),
     assetSelect: getElement("assetSelect"),
@@ -39,7 +46,14 @@ const elements = {
     sold: getElement("sold"),
     costBasis: getElement("costBasis"),
     notes: getElement("notes"),
+    transferMonth: getElement("transferMonth"),
+    transferFrom: getElement("transferFrom"),
+    transferTo: getElement("transferTo"),
+    transferAmount: getElement("transferAmount"),
+    transferNotes: getElement("transferNotes"),
     addNewAsset: getElement("addNewAsset"),
+    transferCashButton: getElement("transferCashButton"),
+    closeTransferButton: getElement("closeTransferButton"),
     timeFrame: getElement("timeFrame"),
     allocationMetric: getElement("allocationMetric"),
     recordMonthFilter: getElement("recordMonthFilter"),
@@ -81,9 +95,11 @@ async function init() {
     populateCategories();
     setActiveTab("dashboard");
     elements.month.value = currentMonth();
+    elements.transferMonth.value = currentMonth();
     elements.dashboardTabButton.addEventListener("click", () => setActiveTab("dashboard"));
     elements.dataTabButton.addEventListener("click", () => setActiveTab("data"));
     elements.form.addEventListener("submit", saveHolding);
+    elements.transferForm.addEventListener("submit", saveCashTransfer);
     elements.institution.addEventListener("change", () => populateCategories());
     elements.currentValue.addEventListener("input", syncSetBalanceAmount);
     elements.movementType.addEventListener("change", updateMovementAmount);
@@ -92,6 +108,8 @@ async function init() {
     elements.sold.addEventListener("change", updateSoldState);
     elements.assetSelect.addEventListener("change", prefillSelectedAsset);
     elements.addNewAsset.addEventListener("click", handleAssetModeButton);
+    elements.transferCashButton.addEventListener("click", showTransferPanel);
+    elements.closeTransferButton.addEventListener("click", hideTransferPanel);
     elements.timeFrame.addEventListener("change", render);
     elements.allocationMetric.addEventListener("change", render);
     elements.recordMonthFilter.addEventListener("change", render);
@@ -133,9 +151,14 @@ function populateCategories(selectedCategory) {
     updateCostBasisVisibility(elements.category.value);
 }
 async function refreshHoldings() {
-    const response = await fetchJson("/api/holdings");
-    state.holdings = response.holdings;
+    const [holdingsResponse, recordsResponse] = await Promise.all([
+        fetchJson("/api/holdings"),
+        fetchJson("/api/records"),
+    ]);
+    state.holdings = holdingsResponse.holdings;
+    state.records = recordsResponse.records;
     populateAssetSelect();
+    populateTransferAccounts();
     populateRecordFilters();
     resetForm();
     render();
@@ -154,6 +177,11 @@ async function saveHolding(event) {
         costBasis: Number(elements.costBasis.value || 0),
         notes: elements.notes.value.trim(),
     };
+    const cashMovementNote = generatedManualSchwabCashMovementNote(payload);
+    if (cashMovementNote) {
+        const existingCash = movementBaseHolding();
+        payload.notes = appendNotes(existingCash?.notes || "", cashMovementNote);
+    }
     if (payload.sold) {
         const saved = await saveConvertedAsset(payload);
         if (saved) {
@@ -162,8 +190,21 @@ async function saveHolding(event) {
         }
         return;
     }
-    const saved = await savePayload(payload, elements.editingId.value || existingMonthlyHoldingId(payload));
+    const existingId = elements.editingId.value || existingMonthlyHoldingId(payload);
+    const saved = await savePayload(payload, existingId);
+    const manualCashDelta = manualCashMovementDelta(payload);
+    if (manualCashDelta) {
+        await saveRecord(recordFromHolding(saved, manualCashDelta > 0 ? "Cash deposit" : "Cash withdrawal", Math.abs(manualCashDelta), cashMovementNote, manualCashDelta));
+    }
+    else {
+        await saveRecord(recordFromHolding(saved, existingId ? "Holding updated" : "Holding entered", saved.currentValue, saved.notes));
+    }
     upsertLocalHolding(saved);
+    if (!existingId && shouldDebitSchwabCashForPurchase(payload)) {
+        await adjustCashHolding(schwabCashAccount(), payload.month, -payload.costBasis, generatedPurchaseNotes(payload), "Purchase cash debit", payload.ticker);
+        await refreshHoldings();
+        return;
+    }
     resetForm();
     render();
 }
@@ -180,7 +221,7 @@ async function savePayload(payload, id = "") {
 }
 async function saveConvertedAsset(payload) {
     if (!isAutoCashConversion(payload)) {
-        alert("Cash generation is supported for Charles Schwab ETFs, Mutual Funds, and CDs marked Matured/Sold only.");
+        alert("Cash generation is supported for Charles Schwab ETFs, Mutual Funds, CDs, and Equities marked Matured/Sold only.");
         return false;
     }
     const proceeds = payload.currentValue;
@@ -191,32 +232,136 @@ async function saveConvertedAsset(payload) {
         costBasis: 0,
         sold: true,
     };
-    await savePayload(convertedPayload, elements.editingId.value || existingMonthlyHoldingId(convertedPayload));
-    const cashPayload = {
-        month: payload.month,
-        institution: "Charles Schwab",
-        asset: generateAssetKey("Charles Schwab", "Cash", "Settlement Cash", proceeds),
-        category: "Cash",
-        ticker: "Settlement Cash",
-        currentValue: proceeds,
-        currentValueIsUnrealizedGain: false,
-        sold: false,
-        costBasis: 0,
-        notes: generatedCashNotes(payload),
-    };
-    await savePayload(cashPayload, existingMonthlyHoldingId(cashPayload));
+    const saved = await savePayload(convertedPayload, elements.editingId.value || existingMonthlyHoldingId(convertedPayload));
+    await saveRecord(recordFromHolding(saved, payload.category === "CD" ? "Asset matured" : "Asset sold", proceeds, generatedCashNotes(payload)));
+    await adjustCashHolding(schwabCashAccount(), payload.month, proceeds, generatedCashNotes(payload), "Sale cash credit", payload.ticker);
     return true;
 }
 function isAutoCashConversion(payload) {
     if (payload.institution !== "Charles Schwab") {
         return false;
     }
-    return ["ETF", "Mutual Fund", "CD"].includes(payload.category);
+    return ["ETF", "Mutual Fund", "CD", "Equities"].includes(payload.category);
 }
 function generatedCashNotes(payload) {
     const action = payload.category === "CD" ? "matured" : "sold";
     const source = payload.ticker || payload.category;
-    return payload.notes ? `Generated from ${action} ${source}. ${payload.notes}` : `Generated from ${action} ${source}.`;
+    const note = `Generated from ${action} ${source}: added proceeds ${preciseCurrency.format(payload.currentValue)}.`;
+    return payload.notes ? `${note} ${payload.notes}` : note;
+}
+function generatedPurchaseNotes(payload) {
+    const source = payload.ticker || payload.category;
+    const note = `Generated from purchase of ${source}: subtracted cost basis ${preciseCurrency.format(payload.costBasis)}.`;
+    return payload.notes ? `${note} ${payload.notes}` : note;
+}
+async function adjustCashHolding(account, month, delta, notes, action, recordTicker = account.ticker) {
+    if (!delta)
+        return;
+    const cashAsset = generateAssetKey(account.institution, account.category, account.ticker, 0);
+    const cashHoldings = state.holdings.filter((holding) => {
+        return holding.month === month && canonicalAssetKey(holding) === cashAsset;
+    });
+    const existingCash = cashHoldings[0];
+    const latestCash = latestCashHolding(account);
+    const currentCash = cashHoldings.length ? sum(cashHoldings, "currentValue") : latestCash?.currentValue || 0;
+    const nextCash = currentCash + delta;
+    const cashPayload = {
+        month,
+        institution: account.institution,
+        asset: cashAsset,
+        category: account.category,
+        ticker: account.ticker,
+        currentValue: nextCash,
+        currentValueIsUnrealizedGain: false,
+        sold: false,
+        costBasis: 0,
+        notes: appendNotes(existingCash?.notes || "", notes),
+    };
+    const saved = await savePayload(cashPayload, existingCash?.id || "");
+    await saveRecord({ ...recordFromHolding(saved, action, Math.abs(delta), notes, delta), ticker: recordTicker });
+}
+function latestCashHolding(account) {
+    const cashAsset = generateAssetKey(account.institution, account.category, account.ticker, 0);
+    return [...state.holdings].sort(sortByMonthDesc).find((holding) => canonicalAssetKey(holding) === cashAsset);
+}
+function shouldDebitSchwabCashForPurchase(payload) {
+    return payload.institution === "Charles Schwab" && payload.category !== "Cash" && payload.costBasis > 0;
+}
+async function saveRecord(payload) {
+    const saved = await fetchJson("/api/records", {
+        method: "POST",
+        body: JSON.stringify(payload),
+    });
+    state.records.unshift(saved);
+    return saved;
+}
+function recordFromHolding(holding, action, amount, notes, cashDelta = 0) {
+    return {
+        month: holding.month,
+        action,
+        institution: holding.institution,
+        category: holding.category,
+        ticker: holding.ticker,
+        amount,
+        cashDelta,
+        notes,
+        holdingId: holding.id,
+    };
+}
+function schwabCashAccount() {
+    return CASH_TRANSFER_ACCOUNTS[0];
+}
+function cashAccountValue(account) {
+    return [account.institution, account.category, account.ticker].join("|");
+}
+function parseCashAccount(value) {
+    return CASH_TRANSFER_ACCOUNTS.find((account) => cashAccountValue(account) === value);
+}
+function transferAccountLabel(account) {
+    return `${account.label} (${preciseCurrency.format(cashAccountBalance(account))})`;
+}
+function cashAccountBalance(account) {
+    return latestCashHolding(account)?.currentValue || 0;
+}
+function generatedManualSchwabCashMovementNote(payload) {
+    if (payload.institution !== "Charles Schwab" || payload.category !== "Cash") {
+        return "";
+    }
+    if (elements.accountMovementPanel.classList.contains("hidden")) {
+        return "";
+    }
+    const movement = elements.movementType.value;
+    if (!["add", "withdraw"].includes(movement)) {
+        return "";
+    }
+    const amount = Number(elements.movementAmount.value || 0);
+    if (!amount) {
+        return "";
+    }
+    const action = movement === "add" ? "Deposit into Cash" : "Withdrawal from Cash";
+    return payload.notes ? `${action}: ${preciseCurrency.format(amount)}. ${payload.notes}` : `${action}: ${preciseCurrency.format(amount)}.`;
+}
+function manualCashMovementDelta(payload) {
+    if (payload.institution !== "Charles Schwab" || payload.category !== "Cash") {
+        return 0;
+    }
+    if (elements.accountMovementPanel.classList.contains("hidden")) {
+        return 0;
+    }
+    const movement = elements.movementType.value;
+    const amount = Number(elements.movementAmount.value || 0);
+    if (movement === "add")
+        return amount;
+    if (movement === "withdraw")
+        return -amount;
+    return 0;
+}
+function appendNotes(existingNotes, nextNote) {
+    if (!existingNotes)
+        return nextNote;
+    if (!nextNote)
+        return existingNotes;
+    return `${existingNotes} ${nextNote}`;
 }
 function upsertLocalHolding(saved) {
     const existingIndex = state.holdings.findIndex((holding) => holding.id === saved.id);
@@ -292,6 +437,59 @@ function populateAssetSelect() {
             .join("")
         : `<option value="">No assets entered yet</option>`;
 }
+function populateTransferAccounts() {
+    const options = CASH_TRANSFER_ACCOUNTS.map((account) => {
+        return `<option value="${escapeHtml(cashAccountValue(account))}">${escapeHtml(transferAccountLabel(account))}</option>`;
+    }).join("");
+    const currentFrom = elements.transferFrom.value;
+    const currentTo = elements.transferTo.value;
+    elements.transferFrom.innerHTML = options;
+    elements.transferTo.innerHTML = options;
+    elements.transferFrom.value = CASH_TRANSFER_ACCOUNTS.some((account) => cashAccountValue(account) === currentFrom)
+        ? currentFrom
+        : cashAccountValue(CASH_TRANSFER_ACCOUNTS[0]);
+    elements.transferTo.value = CASH_TRANSFER_ACCOUNTS.some((account) => cashAccountValue(account) === currentTo)
+        ? currentTo
+        : cashAccountValue(CASH_TRANSFER_ACCOUNTS[1] || CASH_TRANSFER_ACCOUNTS[0]);
+}
+function showTransferPanel() {
+    populateTransferAccounts();
+    elements.transferPanel.classList.remove("hidden");
+    elements.transferMonth.value = elements.month.value || currentMonth();
+    elements.transferAmount.focus();
+}
+function hideTransferPanel() {
+    elements.transferPanel.classList.add("hidden");
+    elements.transferForm.reset();
+    elements.transferMonth.value = currentMonth();
+    populateTransferAccounts();
+}
+async function saveCashTransfer(event) {
+    event.preventDefault();
+    const from = parseCashAccount(elements.transferFrom.value);
+    const to = parseCashAccount(elements.transferTo.value);
+    const amount = Number(elements.transferAmount.value || 0);
+    const month = elements.transferMonth.value;
+    const notes = elements.transferNotes.value.trim();
+    if (!from || !to || cashAccountValue(from) === cashAccountValue(to)) {
+        alert("Choose two different cash accounts.");
+        return;
+    }
+    if (amount <= 0) {
+        alert("Transfer amount must be greater than 0.");
+        return;
+    }
+    const transferNote = notes
+        ? `Cash transfer from ${from.label} to ${to.label}: ${preciseCurrency.format(amount)}. ${notes}`
+        : `Cash transfer from ${from.label} to ${to.label}: ${preciseCurrency.format(amount)}.`;
+    await adjustCashHolding(from, month, -amount, transferNote, "Cash transfer out");
+    await refreshHoldings();
+    await adjustCashHolding(to, month, amount, transferNote, "Cash transfer in");
+    elements.transferForm.reset();
+    elements.transferMonth.value = currentMonth();
+    hideTransferPanel();
+    await refreshHoldings();
+}
 function prefillSelectedAsset() {
     const holding = state.holdings.find((item) => item.id === elements.assetSelect.value);
     if (!holding)
@@ -346,7 +544,7 @@ function render() {
     renderSummary(dashboardHoldings);
     renderAllAssets(dashboardHoldings);
     renderRetirement(retirementHoldings);
-    renderTable(getRecordHoldings());
+    renderTable(getActivityRecords());
 }
 function getDashboardHoldings() {
     const frame = elements.timeFrame.value;
@@ -361,40 +559,42 @@ function getDashboardHoldings() {
     }
     return holdings;
 }
-function getRecordHoldings() {
+function getActivityRecords() {
     const query = elements.search.value.trim().toLowerCase();
-    let holdings = [...state.holdings].sort(sortByMonthDesc);
+    let records = [...state.records].sort(sortRecordByEntryDateDesc);
     const month = elements.recordMonthFilter.value;
     const institution = elements.recordInstitutionFilter.value;
     const category = elements.recordCategoryFilter.value;
     const ticker = elements.recordTickerFilter.value;
     if (month)
-        holdings = holdings.filter((holding) => holding.month === month);
+        records = records.filter((record) => record.month === month);
     if (institution)
-        holdings = holdings.filter((holding) => holding.institution === institution);
+        records = records.filter((record) => record.institution === institution);
     if (category)
-        holdings = holdings.filter((holding) => holding.category === category);
+        records = records.filter((record) => record.category === category);
     if (ticker)
-        holdings = holdings.filter((holding) => (holding.ticker || "") === ticker);
+        records = records.filter((record) => (record.ticker || "") === ticker);
     if (query) {
-        holdings = holdings.filter((holding) => {
+        records = records.filter((record) => {
             return [
-                holding.currentValueIsUnrealizedGain ? "unrealized gain" : "current value",
-                holding.sold ? "sold" : "active",
-                holding.notes,
+                record.action,
+                record.institution,
+                record.category,
+                record.ticker,
+                record.notes,
             ]
                 .join(" ")
                 .toLowerCase()
                 .includes(query);
         });
     }
-    return holdings;
+    return records;
 }
 function populateRecordFilters() {
-    setFilterOptions(elements.recordMonthFilter, uniqueMonths(state.holdings), "All Months");
-    setFilterOptions(elements.recordInstitutionFilter, uniqueValues(state.holdings, "institution"), "All Institutions");
-    setFilterOptions(elements.recordCategoryFilter, uniqueValues(state.holdings, "category"), "All Categories");
-    setFilterOptions(elements.recordTickerFilter, uniqueTickers(state.holdings), "All Tickers/Products");
+    setFilterOptions(elements.recordMonthFilter, uniqueRecordMonths(state.records), "All Months");
+    setFilterOptions(elements.recordInstitutionFilter, uniqueRecordValues(state.records, "institution"), "All Institutions");
+    setFilterOptions(elements.recordCategoryFilter, uniqueRecordValues(state.records, "category"), "All Categories");
+    setFilterOptions(elements.recordTickerFilter, uniqueRecordTickers(state.records), "All Tickers/Products");
 }
 function setFilterOptions(select, values, allLabel) {
     const currentValue = select.value;
@@ -409,6 +609,15 @@ function uniqueValues(holdings, key) {
 }
 function uniqueTickers(holdings) {
     return [...new Set(holdings.map((holding) => holding.ticker || ""))].sort((a, b) => a.localeCompare(b));
+}
+function uniqueRecordMonths(records) {
+    return [...new Set(records.map((record) => record.month))].sort().reverse();
+}
+function uniqueRecordValues(records, key) {
+    return [...new Set(records.map((record) => record[key]))].sort((a, b) => a.localeCompare(b));
+}
+function uniqueRecordTickers(records) {
+    return [...new Set(records.map((record) => record.ticker || ""))].sort((a, b) => a.localeCompare(b));
 }
 function renderSummary(holdings) {
     const allocationHoldings = holdings.filter((holding) => isNonRetirementSummaryCategory(holding.category));
@@ -512,41 +721,32 @@ function renderRetirement(holdings) {
     })
         .join("");
 }
-function renderTable(holdings) {
-    if (!holdings.length) {
+function renderTable(records) {
+    if (!records.length) {
         elements.table.innerHTML = `
       <tr>
-        <td colspan="10">${elements.emptyState.innerHTML}</td>
+        <td colspan="9">${elements.emptyState.innerHTML}</td>
       </tr>
     `;
         return;
     }
-    elements.table.innerHTML = holdings
-        .map((holding) => {
+    elements.table.innerHTML = records
+        .map((record) => {
         return `
         <tr>
-          <td>${escapeHtml(holding.month)}</td>
-          <td>${escapeHtml(holding.institution)}</td>
-          <td>${escapeHtml(holding.category)}</td>
-          <td>${escapeHtml(holding.ticker || "-")}</td>
-          <td class="number">${preciseCurrency.format(holding.currentValue)}</td>
-          <td>${holding.currentValueIsUnrealizedGain ? "Unrealized Gain" : "Current Value"}</td>
-          <td>${holding.sold ? "Yes" : "No"}</td>
-          <td class="number">${preciseCurrency.format(holding.costBasis || 0)}</td>
-          <td>${escapeHtml(holding.notes || "-")}</td>
-          <td>
-            <div class="actions">
-              <button class="link-button" type="button" data-action="edit" data-id="${holding.id}">Edit</button>
-              <button class="link-button danger" type="button" data-action="delete" data-id="${holding.id}">Delete</button>
-            </div>
-          </td>
+          <td>${escapeHtml(record.month)}</td>
+          <td>${escapeHtml(formatEntryTimestamp(record.createdAt))}</td>
+          <td>${escapeHtml(record.action)}</td>
+          <td>${escapeHtml(record.institution)}</td>
+          <td>${escapeHtml(record.category)}</td>
+          <td>${escapeHtml(record.ticker || "-")}</td>
+          <td class="number">${record.amount ? preciseCurrency.format(record.amount) : "-"}</td>
+          <td class="number">${record.cashDelta ? preciseCurrency.format(record.cashDelta) : "-"}</td>
+          <td>${escapeHtml(record.notes || "-")}</td>
         </tr>
       `;
     })
         .join("");
-    elements.table.querySelectorAll("button[data-action]").forEach((button) => {
-        button.addEventListener("click", handleTableAction);
-    });
 }
 async function handleTableAction(event) {
     const target = event.currentTarget;
@@ -629,15 +829,35 @@ function renderMetricRow({ holdings, totalValue, totalCost, totalGain, monthsTra
 function sortByMonthDesc(a, b) {
     return b.month.localeCompare(a.month) || a.institution.localeCompare(b.institution);
 }
+function sortByEntryDateDesc(a, b) {
+    const aEntryDate = a.createdAt || a.updatedAt || "";
+    const bEntryDate = b.createdAt || b.updatedAt || "";
+    return bEntryDate.localeCompare(aEntryDate) || sortByMonthDesc(a, b);
+}
+function sortRecordByEntryDateDesc(a, b) {
+    return b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id);
+}
+function formatEntryTimestamp(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime()))
+        return value;
+    return date.toLocaleString();
+}
 function barColor(index) {
     const colors = ["#5b8cff", "#f0b35b", "#7aa2ff", "#d87fd3", "#55c7d9", "#ff7d8a"];
     return colors[index % colors.length];
 }
 function generateAssetKey(institution, category, ticker, costBasis) {
+    if (institution === "Charles Schwab" && category === "Cash") {
+        ticker = "";
+    }
     const parts = isAccountStyleCategory(category)
         ? [institution, category, ticker || "No ticker"]
         : [institution, category, ticker || "No ticker", costBasis.toFixed(2)];
     return parts.map(keyPart).join("_");
+}
+function schwabCashAssetKey() {
+    return generateAssetKey("Charles Schwab", "Cash", "", 0);
 }
 function canonicalAssetKey(holding) {
     return generateAssetKey(holding.institution, holding.category, holding.ticker, holding.costBasis || 0);

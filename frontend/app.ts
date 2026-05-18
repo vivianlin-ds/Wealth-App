@@ -5,6 +5,7 @@ type Category =
   | "ETF"
   | "Mutual Fund"
   | "CD"
+  | "Equities"
   | "401k"
   | "Roth"
   | "Roth Investment"
@@ -28,14 +29,34 @@ type Holding = {
 };
 
 type HoldingPayload = Omit<Holding, "id" | "createdAt" | "updatedAt">;
+type ActivityRecord = {
+  id: string;
+  month: string;
+  action: string;
+  institution: Institution;
+  category: Category;
+  ticker: string;
+  amount: number;
+  cashDelta: number;
+  notes: string;
+  holdingId: string;
+  createdAt: string;
+};
+type ActivityRecordPayload = Omit<ActivityRecord, "id" | "createdAt">;
 type TimeFrame = "latest" | "3" | "6" | "12" | "all";
 type FormMode = "existing" | "new" | "edit";
 type AllocationMetric = "currentValue" | "costBasis";
 type MovementType = "set" | "add" | "withdraw";
+type CashAccount = {
+  institution: Institution;
+  category: Category;
+  ticker: string;
+  label: string;
+};
 
 const INSTITUTION_CATEGORIES: Record<Institution, Category[]> = {
   Wealthfront: ["High yield saving"],
-  "Charles Schwab": ["Cash", "ETF", "Mutual Fund", "CD"],
+  "Charles Schwab": ["Cash", "ETF", "Mutual Fund", "CD", "Equities"],
   Fidelity: ["401k", "Roth", "Roth Investment"],
   Alight: ["HSA", "HSA Investment"],
 };
@@ -46,10 +67,15 @@ const ACCOUNT_STYLE_CATEGORIES: Category[] = ["High yield saving", "Cash", "401k
 const MOVEMENT_CATEGORIES: Category[] = ["High yield saving", "Cash", "401k", "Roth", "HSA"];
 const NO_COST_BASIS_CATEGORIES: Category[] = [];
 const RETIREMENT_CATEGORIES: Category[] = ["401k", "Roth", "Roth Investment", "HSA", "HSA Investment"];
-const NON_RETIREMENT_SUMMARY_CATEGORIES: Category[] = ["High yield saving", "Cash", "CD", "ETF"];
+const NON_RETIREMENT_SUMMARY_CATEGORIES: Category[] = ["High yield saving", "Cash", "CD", "ETF", "Equities"];
+const CASH_TRANSFER_ACCOUNTS: CashAccount[] = [
+  { institution: "Charles Schwab", category: "Cash", ticker: "", label: "Charles Schwab - Cash" },
+  { institution: "Wealthfront", category: "High yield saving", ticker: "HYSA", label: "Wealthfront - High yield saving" },
+];
 
-const state: { holdings: Holding[]; formMode: FormMode } = {
+const state: { holdings: Holding[]; records: ActivityRecord[]; formMode: FormMode } = {
   holdings: [],
+  records: [],
   formMode: "new",
 };
 
@@ -59,6 +85,8 @@ const elements = {
   dashboardPane: getElement<HTMLElement>("dashboardPane"),
   dataPane: getElement<HTMLElement>("dataPane"),
   form: getElement<HTMLFormElement>("holdingForm"),
+  transferPanel: getElement<HTMLElement>("transferPanel"),
+  transferForm: getElement<HTMLFormElement>("transferForm"),
   editingId: getElement<HTMLInputElement>("editingId"),
   month: getElement<HTMLInputElement>("month"),
   assetSelect: getElement<HTMLSelectElement>("assetSelect"),
@@ -76,7 +104,14 @@ const elements = {
   sold: getElement<HTMLInputElement>("sold"),
   costBasis: getElement<HTMLInputElement>("costBasis"),
   notes: getElement<HTMLTextAreaElement>("notes"),
+  transferMonth: getElement<HTMLInputElement>("transferMonth"),
+  transferFrom: getElement<HTMLSelectElement>("transferFrom"),
+  transferTo: getElement<HTMLSelectElement>("transferTo"),
+  transferAmount: getElement<HTMLInputElement>("transferAmount"),
+  transferNotes: getElement<HTMLTextAreaElement>("transferNotes"),
   addNewAsset: getElement<HTMLButtonElement>("addNewAsset"),
+  transferCashButton: getElement<HTMLButtonElement>("transferCashButton"),
+  closeTransferButton: getElement<HTMLButtonElement>("closeTransferButton"),
   timeFrame: getElement<HTMLSelectElement>("timeFrame"),
   allocationMetric: getElement<HTMLSelectElement>("allocationMetric"),
   recordMonthFilter: getElement<HTMLSelectElement>("recordMonthFilter"),
@@ -122,9 +157,11 @@ async function init(): Promise<void> {
   populateCategories();
   setActiveTab("dashboard");
   elements.month.value = currentMonth();
+  elements.transferMonth.value = currentMonth();
   elements.dashboardTabButton.addEventListener("click", () => setActiveTab("dashboard"));
   elements.dataTabButton.addEventListener("click", () => setActiveTab("data"));
   elements.form.addEventListener("submit", saveHolding);
+  elements.transferForm.addEventListener("submit", saveCashTransfer);
   elements.institution.addEventListener("change", () => populateCategories());
   elements.currentValue.addEventListener("input", syncSetBalanceAmount);
   elements.movementType.addEventListener("change", updateMovementAmount);
@@ -133,6 +170,8 @@ async function init(): Promise<void> {
   elements.sold.addEventListener("change", updateSoldState);
   elements.assetSelect.addEventListener("change", prefillSelectedAsset);
   elements.addNewAsset.addEventListener("click", handleAssetModeButton);
+  elements.transferCashButton.addEventListener("click", showTransferPanel);
+  elements.closeTransferButton.addEventListener("click", hideTransferPanel);
   elements.timeFrame.addEventListener("change", render);
   elements.allocationMetric.addEventListener("change", render);
   elements.recordMonthFilter.addEventListener("change", render);
@@ -179,9 +218,14 @@ function populateCategories(selectedCategory?: Category): void {
 }
 
 async function refreshHoldings(): Promise<void> {
-  const response = await fetchJson<{ holdings: Holding[] }>("/api/holdings");
-  state.holdings = response.holdings;
+  const [holdingsResponse, recordsResponse] = await Promise.all([
+    fetchJson<{ holdings: Holding[] }>("/api/holdings"),
+    fetchJson<{ records: ActivityRecord[] }>("/api/records"),
+  ]);
+  state.holdings = holdingsResponse.holdings;
+  state.records = recordsResponse.records;
   populateAssetSelect();
+  populateTransferAccounts();
   populateRecordFilters();
   resetForm();
   render();
@@ -203,6 +247,12 @@ async function saveHolding(event: SubmitEvent): Promise<void> {
     notes: elements.notes.value.trim(),
   };
 
+  const cashMovementNote = generatedManualSchwabCashMovementNote(payload);
+  if (cashMovementNote) {
+    const existingCash = movementBaseHolding();
+    payload.notes = appendNotes(existingCash?.notes || "", cashMovementNote);
+  }
+
   if (payload.sold) {
     const saved = await saveConvertedAsset(payload);
     if (saved) {
@@ -212,8 +262,27 @@ async function saveHolding(event: SubmitEvent): Promise<void> {
     return;
   }
 
-  const saved = await savePayload(payload, elements.editingId.value || existingMonthlyHoldingId(payload));
+  const existingId = elements.editingId.value || existingMonthlyHoldingId(payload);
+  const saved = await savePayload(payload, existingId);
+  const manualCashDelta = manualCashMovementDelta(payload);
+  if (manualCashDelta) {
+    await saveRecord(recordFromHolding(saved, manualCashDelta > 0 ? "Cash deposit" : "Cash withdrawal", Math.abs(manualCashDelta), cashMovementNote, manualCashDelta));
+  } else {
+    await saveRecord(recordFromHolding(saved, existingId ? "Holding updated" : "Holding entered", saved.currentValue, saved.notes));
+  }
   upsertLocalHolding(saved);
+  if (!existingId && shouldDebitSchwabCashForPurchase(payload)) {
+    await adjustCashHolding(
+      schwabCashAccount(),
+      payload.month,
+      -payload.costBasis,
+      generatedPurchaseNotes(payload),
+      "Purchase cash debit",
+      payload.ticker,
+    );
+    await refreshHoldings();
+    return;
+  }
   resetForm();
   render();
 }
@@ -232,7 +301,7 @@ async function savePayload(payload: HoldingPayload, id = ""): Promise<Holding> {
 
 async function saveConvertedAsset(payload: HoldingPayload): Promise<boolean> {
   if (!isAutoCashConversion(payload)) {
-    alert("Cash generation is supported for Charles Schwab ETFs, Mutual Funds, and CDs marked Matured/Sold only.");
+    alert("Cash generation is supported for Charles Schwab ETFs, Mutual Funds, CDs, and Equities marked Matured/Sold only.");
     return false;
   }
 
@@ -244,21 +313,9 @@ async function saveConvertedAsset(payload: HoldingPayload): Promise<boolean> {
     costBasis: 0,
     sold: true,
   };
-  await savePayload(convertedPayload, elements.editingId.value || existingMonthlyHoldingId(convertedPayload));
-
-  const cashPayload: HoldingPayload = {
-    month: payload.month,
-    institution: "Charles Schwab",
-    asset: generateAssetKey("Charles Schwab", "Cash", "Settlement Cash", proceeds),
-    category: "Cash",
-    ticker: "Settlement Cash",
-    currentValue: proceeds,
-    currentValueIsUnrealizedGain: false,
-    sold: false,
-    costBasis: 0,
-    notes: generatedCashNotes(payload),
-  };
-  await savePayload(cashPayload, existingMonthlyHoldingId(cashPayload));
+  const saved = await savePayload(convertedPayload, elements.editingId.value || existingMonthlyHoldingId(convertedPayload));
+  await saveRecord(recordFromHolding(saved, payload.category === "CD" ? "Asset matured" : "Asset sold", proceeds, generatedCashNotes(payload)));
+  await adjustCashHolding(schwabCashAccount(), payload.month, proceeds, generatedCashNotes(payload), "Sale cash credit", payload.ticker);
   return true;
 }
 
@@ -266,13 +323,155 @@ function isAutoCashConversion(payload: HoldingPayload): boolean {
   if (payload.institution !== "Charles Schwab") {
     return false;
   }
-  return ["ETF", "Mutual Fund", "CD"].includes(payload.category);
+  return ["ETF", "Mutual Fund", "CD", "Equities"].includes(payload.category);
 }
 
 function generatedCashNotes(payload: HoldingPayload): string {
   const action = payload.category === "CD" ? "matured" : "sold";
   const source = payload.ticker || payload.category;
-  return payload.notes ? `Generated from ${action} ${source}. ${payload.notes}` : `Generated from ${action} ${source}.`;
+  const note = `Generated from ${action} ${source}: added proceeds ${preciseCurrency.format(payload.currentValue)}.`;
+  return payload.notes ? `${note} ${payload.notes}` : note;
+}
+
+function generatedPurchaseNotes(payload: HoldingPayload): string {
+  const source = payload.ticker || payload.category;
+  const note = `Generated from purchase of ${source}: subtracted cost basis ${preciseCurrency.format(payload.costBasis)}.`;
+  return payload.notes ? `${note} ${payload.notes}` : note;
+}
+
+async function adjustCashHolding(
+  account: CashAccount,
+  month: string,
+  delta: number,
+  notes: string,
+  action: string,
+  recordTicker = account.ticker,
+): Promise<void> {
+  if (!delta) return;
+
+  const cashAsset = generateAssetKey(account.institution, account.category, account.ticker, 0);
+  const cashHoldings = state.holdings.filter((holding) => {
+    return holding.month === month && canonicalAssetKey(holding) === cashAsset;
+  });
+  const existingCash = cashHoldings[0];
+  const latestCash = latestCashHolding(account);
+  const currentCash = cashHoldings.length ? sum(cashHoldings, "currentValue") : latestCash?.currentValue || 0;
+  const nextCash = currentCash + delta;
+
+  const cashPayload: HoldingPayload = {
+    month,
+    institution: account.institution,
+    asset: cashAsset,
+    category: account.category,
+    ticker: account.ticker,
+    currentValue: nextCash,
+    currentValueIsUnrealizedGain: false,
+    sold: false,
+    costBasis: 0,
+    notes: appendNotes(existingCash?.notes || "", notes),
+  };
+  const saved = await savePayload(cashPayload, existingCash?.id || "");
+  await saveRecord({ ...recordFromHolding(saved, action, Math.abs(delta), notes, delta), ticker: recordTicker });
+}
+
+function latestCashHolding(account: CashAccount): Holding | undefined {
+  const cashAsset = generateAssetKey(account.institution, account.category, account.ticker, 0);
+  return [...state.holdings].sort(sortByMonthDesc).find((holding) => canonicalAssetKey(holding) === cashAsset);
+}
+
+function shouldDebitSchwabCashForPurchase(payload: HoldingPayload): boolean {
+  return payload.institution === "Charles Schwab" && payload.category !== "Cash" && payload.costBasis > 0;
+}
+
+async function saveRecord(payload: ActivityRecordPayload): Promise<ActivityRecord> {
+  const saved = await fetchJson<ActivityRecord>("/api/records", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  state.records.unshift(saved);
+  return saved;
+}
+
+function recordFromHolding(
+  holding: Holding,
+  action: string,
+  amount: number,
+  notes: string,
+  cashDelta = 0,
+): ActivityRecordPayload {
+  return {
+    month: holding.month,
+    action,
+    institution: holding.institution,
+    category: holding.category,
+    ticker: holding.ticker,
+    amount,
+    cashDelta,
+    notes,
+    holdingId: holding.id,
+  };
+}
+
+function schwabCashAccount(): CashAccount {
+  return CASH_TRANSFER_ACCOUNTS[0];
+}
+
+function cashAccountValue(account: CashAccount): string {
+  return [account.institution, account.category, account.ticker].join("|");
+}
+
+function parseCashAccount(value: string): CashAccount | undefined {
+  return CASH_TRANSFER_ACCOUNTS.find((account) => cashAccountValue(account) === value);
+}
+
+function transferAccountLabel(account: CashAccount): string {
+  return `${account.label} (${preciseCurrency.format(cashAccountBalance(account))})`;
+}
+
+function cashAccountBalance(account: CashAccount): number {
+  return latestCashHolding(account)?.currentValue || 0;
+}
+
+function generatedManualSchwabCashMovementNote(payload: HoldingPayload): string {
+  if (payload.institution !== "Charles Schwab" || payload.category !== "Cash") {
+    return "";
+  }
+  if (elements.accountMovementPanel.classList.contains("hidden")) {
+    return "";
+  }
+
+  const movement = elements.movementType.value as MovementType;
+  if (!["add", "withdraw"].includes(movement)) {
+    return "";
+  }
+
+  const amount = Number(elements.movementAmount.value || 0);
+  if (!amount) {
+    return "";
+  }
+
+  const action = movement === "add" ? "Deposit into Cash" : "Withdrawal from Cash";
+  return payload.notes ? `${action}: ${preciseCurrency.format(amount)}. ${payload.notes}` : `${action}: ${preciseCurrency.format(amount)}.`;
+}
+
+function manualCashMovementDelta(payload: HoldingPayload): number {
+  if (payload.institution !== "Charles Schwab" || payload.category !== "Cash") {
+    return 0;
+  }
+  if (elements.accountMovementPanel.classList.contains("hidden")) {
+    return 0;
+  }
+  const movement = elements.movementType.value as MovementType;
+  const amount = Number(elements.movementAmount.value || 0);
+  if (movement === "add") return amount;
+  if (movement === "withdraw") return -amount;
+  return 0;
+}
+
+function appendNotes(existingNotes: string, nextNote: string): string {
+  if (!existingNotes) return nextNote;
+  if (!nextNote) return existingNotes;
+  return `${existingNotes} ${nextNote}`;
 }
 
 function upsertLocalHolding(saved: Holding): void {
@@ -355,6 +554,67 @@ function populateAssetSelect(): void {
     : `<option value="">No assets entered yet</option>`;
 }
 
+function populateTransferAccounts(): void {
+  const options = CASH_TRANSFER_ACCOUNTS.map((account) => {
+    return `<option value="${escapeHtml(cashAccountValue(account))}">${escapeHtml(transferAccountLabel(account))}</option>`;
+  }).join("");
+  const currentFrom = elements.transferFrom.value;
+  const currentTo = elements.transferTo.value;
+  elements.transferFrom.innerHTML = options;
+  elements.transferTo.innerHTML = options;
+  elements.transferFrom.value = CASH_TRANSFER_ACCOUNTS.some((account) => cashAccountValue(account) === currentFrom)
+    ? currentFrom
+    : cashAccountValue(CASH_TRANSFER_ACCOUNTS[0]);
+  elements.transferTo.value = CASH_TRANSFER_ACCOUNTS.some((account) => cashAccountValue(account) === currentTo)
+    ? currentTo
+    : cashAccountValue(CASH_TRANSFER_ACCOUNTS[1] || CASH_TRANSFER_ACCOUNTS[0]);
+}
+
+function showTransferPanel(): void {
+  populateTransferAccounts();
+  elements.transferPanel.classList.remove("hidden");
+  elements.transferMonth.value = elements.month.value || currentMonth();
+  elements.transferAmount.focus();
+}
+
+function hideTransferPanel(): void {
+  elements.transferPanel.classList.add("hidden");
+  elements.transferForm.reset();
+  elements.transferMonth.value = currentMonth();
+  populateTransferAccounts();
+}
+
+async function saveCashTransfer(event: SubmitEvent): Promise<void> {
+  event.preventDefault();
+
+  const from = parseCashAccount(elements.transferFrom.value);
+  const to = parseCashAccount(elements.transferTo.value);
+  const amount = Number(elements.transferAmount.value || 0);
+  const month = elements.transferMonth.value;
+  const notes = elements.transferNotes.value.trim();
+
+  if (!from || !to || cashAccountValue(from) === cashAccountValue(to)) {
+    alert("Choose two different cash accounts.");
+    return;
+  }
+  if (amount <= 0) {
+    alert("Transfer amount must be greater than 0.");
+    return;
+  }
+
+  const transferNote = notes
+    ? `Cash transfer from ${from.label} to ${to.label}: ${preciseCurrency.format(amount)}. ${notes}`
+    : `Cash transfer from ${from.label} to ${to.label}: ${preciseCurrency.format(amount)}.`;
+  await adjustCashHolding(from, month, -amount, transferNote, "Cash transfer out");
+  await refreshHoldings();
+  await adjustCashHolding(to, month, amount, transferNote, "Cash transfer in");
+
+  elements.transferForm.reset();
+  elements.transferMonth.value = currentMonth();
+  hideTransferPanel();
+  await refreshHoldings();
+}
+
 function prefillSelectedAsset(): void {
   const holding = state.holdings.find((item) => item.id === elements.assetSelect.value);
   if (!holding) return;
@@ -421,7 +681,7 @@ function render(): void {
   renderSummary(dashboardHoldings);
   renderAllAssets(dashboardHoldings);
   renderRetirement(retirementHoldings);
-  renderTable(getRecordHoldings());
+  renderTable(getActivityRecords());
 }
 
 function getDashboardHoldings(): Holding[] {
@@ -439,25 +699,27 @@ function getDashboardHoldings(): Holding[] {
   return holdings;
 }
 
-function getRecordHoldings(): Holding[] {
+function getActivityRecords(): ActivityRecord[] {
   const query = elements.search.value.trim().toLowerCase();
-  let holdings = [...state.holdings].sort(sortByMonthDesc);
+  let records = [...state.records].sort(sortRecordByEntryDateDesc);
   const month = elements.recordMonthFilter.value;
   const institution = elements.recordInstitutionFilter.value;
   const category = elements.recordCategoryFilter.value;
   const ticker = elements.recordTickerFilter.value;
 
-  if (month) holdings = holdings.filter((holding) => holding.month === month);
-  if (institution) holdings = holdings.filter((holding) => holding.institution === institution);
-  if (category) holdings = holdings.filter((holding) => holding.category === category);
-  if (ticker) holdings = holdings.filter((holding) => (holding.ticker || "") === ticker);
+  if (month) records = records.filter((record) => record.month === month);
+  if (institution) records = records.filter((record) => record.institution === institution);
+  if (category) records = records.filter((record) => record.category === category);
+  if (ticker) records = records.filter((record) => (record.ticker || "") === ticker);
 
   if (query) {
-    holdings = holdings.filter((holding) => {
+    records = records.filter((record) => {
       return [
-        holding.currentValueIsUnrealizedGain ? "unrealized gain" : "current value",
-        holding.sold ? "sold" : "active",
-        holding.notes,
+        record.action,
+        record.institution,
+        record.category,
+        record.ticker,
+        record.notes,
       ]
         .join(" ")
         .toLowerCase()
@@ -465,14 +727,14 @@ function getRecordHoldings(): Holding[] {
     });
   }
 
-  return holdings;
+  return records;
 }
 
 function populateRecordFilters(): void {
-  setFilterOptions(elements.recordMonthFilter, uniqueMonths(state.holdings), "All Months");
-  setFilterOptions(elements.recordInstitutionFilter, uniqueValues(state.holdings, "institution"), "All Institutions");
-  setFilterOptions(elements.recordCategoryFilter, uniqueValues(state.holdings, "category"), "All Categories");
-  setFilterOptions(elements.recordTickerFilter, uniqueTickers(state.holdings), "All Tickers/Products");
+  setFilterOptions(elements.recordMonthFilter, uniqueRecordMonths(state.records), "All Months");
+  setFilterOptions(elements.recordInstitutionFilter, uniqueRecordValues(state.records, "institution"), "All Institutions");
+  setFilterOptions(elements.recordCategoryFilter, uniqueRecordValues(state.records, "category"), "All Categories");
+  setFilterOptions(elements.recordTickerFilter, uniqueRecordTickers(state.records), "All Tickers/Products");
 }
 
 function setFilterOptions(select: HTMLSelectElement, values: string[], allLabel: string): void {
@@ -490,6 +752,18 @@ function uniqueValues(holdings: Holding[], key: "institution" | "category"): str
 
 function uniqueTickers(holdings: Holding[]): string[] {
   return [...new Set(holdings.map((holding) => holding.ticker || ""))].sort((a, b) => a.localeCompare(b));
+}
+
+function uniqueRecordMonths(records: ActivityRecord[]): string[] {
+  return [...new Set(records.map((record) => record.month))].sort().reverse();
+}
+
+function uniqueRecordValues(records: ActivityRecord[], key: "institution" | "category"): string[] {
+  return [...new Set(records.map((record) => record[key]))].sort((a, b) => a.localeCompare(b));
+}
+
+function uniqueRecordTickers(records: ActivityRecord[]): string[] {
+  return [...new Set(records.map((record) => record.ticker || ""))].sort((a, b) => a.localeCompare(b));
 }
 
 function renderSummary(holdings: Holding[]): void {
@@ -606,43 +880,33 @@ function renderRetirement(holdings: Holding[]): void {
     .join("");
 }
 
-function renderTable(holdings: Holding[]): void {
-  if (!holdings.length) {
+function renderTable(records: ActivityRecord[]): void {
+  if (!records.length) {
     elements.table.innerHTML = `
       <tr>
-        <td colspan="10">${elements.emptyState.innerHTML}</td>
+        <td colspan="9">${elements.emptyState.innerHTML}</td>
       </tr>
     `;
     return;
   }
 
-  elements.table.innerHTML = holdings
-    .map((holding) => {
+  elements.table.innerHTML = records
+    .map((record) => {
       return `
         <tr>
-          <td>${escapeHtml(holding.month)}</td>
-          <td>${escapeHtml(holding.institution)}</td>
-          <td>${escapeHtml(holding.category)}</td>
-          <td>${escapeHtml(holding.ticker || "-")}</td>
-          <td class="number">${preciseCurrency.format(holding.currentValue)}</td>
-          <td>${holding.currentValueIsUnrealizedGain ? "Unrealized Gain" : "Current Value"}</td>
-          <td>${holding.sold ? "Yes" : "No"}</td>
-          <td class="number">${preciseCurrency.format(holding.costBasis || 0)}</td>
-          <td>${escapeHtml(holding.notes || "-")}</td>
-          <td>
-            <div class="actions">
-              <button class="link-button" type="button" data-action="edit" data-id="${holding.id}">Edit</button>
-              <button class="link-button danger" type="button" data-action="delete" data-id="${holding.id}">Delete</button>
-            </div>
-          </td>
+          <td>${escapeHtml(record.month)}</td>
+          <td>${escapeHtml(formatEntryTimestamp(record.createdAt))}</td>
+          <td>${escapeHtml(record.action)}</td>
+          <td>${escapeHtml(record.institution)}</td>
+          <td>${escapeHtml(record.category)}</td>
+          <td>${escapeHtml(record.ticker || "-")}</td>
+          <td class="number">${record.amount ? preciseCurrency.format(record.amount) : "-"}</td>
+          <td class="number">${record.cashDelta ? preciseCurrency.format(record.cashDelta) : "-"}</td>
+          <td>${escapeHtml(record.notes || "-")}</td>
         </tr>
       `;
     })
     .join("");
-
-  elements.table.querySelectorAll<HTMLButtonElement>("button[data-action]").forEach((button) => {
-    button.addEventListener("click", handleTableAction);
-  });
 }
 
 async function handleTableAction(event: MouseEvent): Promise<void> {
@@ -749,6 +1013,22 @@ function sortByMonthDesc(a: Holding, b: Holding): number {
   return b.month.localeCompare(a.month) || a.institution.localeCompare(b.institution);
 }
 
+function sortByEntryDateDesc(a: Holding, b: Holding): number {
+  const aEntryDate = a.createdAt || a.updatedAt || "";
+  const bEntryDate = b.createdAt || b.updatedAt || "";
+  return bEntryDate.localeCompare(aEntryDate) || sortByMonthDesc(a, b);
+}
+
+function sortRecordByEntryDateDesc(a: ActivityRecord, b: ActivityRecord): number {
+  return b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id);
+}
+
+function formatEntryTimestamp(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
 function barColor(index: number): string {
   const colors = ["#5b8cff", "#f0b35b", "#7aa2ff", "#d87fd3", "#55c7d9", "#ff7d8a"];
   return colors[index % colors.length];
@@ -760,10 +1040,17 @@ function generateAssetKey(
   ticker: string,
   costBasis: number,
 ): string {
+  if (institution === "Charles Schwab" && category === "Cash") {
+    ticker = "";
+  }
   const parts = isAccountStyleCategory(category)
     ? [institution, category, ticker || "No ticker"]
     : [institution, category, ticker || "No ticker", costBasis.toFixed(2)];
   return parts.map(keyPart).join("_");
+}
+
+function schwabCashAssetKey(): string {
+  return generateAssetKey("Charles Schwab", "Cash", "", 0);
 }
 
 function canonicalAssetKey(holding: Holding): string {

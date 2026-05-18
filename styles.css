@@ -115,6 +115,13 @@ h2 {
   gap: 12px;
 }
 
+.entry-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .controls,
 .record-filters {
   flex-wrap: wrap;
@@ -508,7 +515,8 @@ tr:last-child td {
 
 @media (max-width: 680px) {
   .app-header,
-  .panel-heading {
+  .panel-heading,
+  .entry-actions {
     align-items: stretch;
     flex-direction: column;
   }

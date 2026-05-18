@@ -4,6 +4,14 @@ A local Python + TypeScript dashboard for monthly tracking of where money is all
 
 ## Run
 
+Build the TypeScript and start the local server:
+
+```bash
+npm run build:start
+```
+
+Or start the Python server directly:
+
 ```bash
 python3 backend/server.py
 ```
@@ -36,7 +44,7 @@ npm run build
 - Ticker/Product
 - Current Value
 - Whether Current Value was entered as unrealized gain
-- Whether a Charles Schwab ETF, mutual fund, or CD was matured/sold
+- Whether a Charles Schwab ETF, mutual fund, CD, or equity was matured/sold
 - Cost Basis, optional for every asset/category
 - Notes
 - Month
@@ -44,15 +52,15 @@ npm run build
 Supported institution/category combinations:
 
 - Wealthfront: High yield saving
-- Charles Schwab: Cash, ETF, Mutual Fund, CD
+- Charles Schwab: Cash, ETF, Mutual Fund, CD, Equities
 - Fidelity: 401k, Roth, Roth Investment
 - Alight: HSA, HSA Investment
 
 Account-style categories use one stable asset key even when money is added or withdrawn: High yield saving, Cash, 401k, Roth, HSA.
-Investment-style categories include Cost Basis in the asset key: ETF, Mutual Fund, CD, Roth Investment, HSA Investment.
+Investment-style categories include Cost Basis in the asset key: ETF, Mutual Fund, CD, Equities, Roth Investment, HSA Investment.
 
 Cost Basis is included in Total Cost Basis and Unrealized Gain/Loss calculations when the category is part of the current dashboard view.
-The Non-Retirement dashboard summarizes High yield saving, Cash, CD, and ETF categories.
+The Non-Retirement dashboard summarizes High yield saving, Cash, CD, ETF, and Equities categories.
 The All Assets dashboard summarizes every category.
 The Retirement dashboard summarizes 401k, Roth, Roth Investment, HSA, and HSA Investment categories.
 
@@ -61,5 +69,9 @@ set the new balance directly, add money to the previous balance, or withdraw mon
 
 ## Sold Assets
 
-For a Charles Schwab ETF, Mutual Fund, or CD, enter the proceeds in `Current Value` and check `Matured/Sold`.
+For a Charles Schwab ETF, Mutual Fund, CD, or Equities holding, enter the proceeds in `Current Value` and check `Matured/Sold`.
 The app saves the asset at `0` for the month and creates or updates a Charles Schwab `Cash` row for the same month.
+When a new Charles Schwab non-Cash holding is added, its Cost Basis is subtracted from the Charles Schwab `Cash` row for that month.
+The Records table is an activity log sorted by entry timestamp descending. New holdings, updates, cash deposits/withdrawals, sale/maturity cash credits, purchase cash debits, and cash transfers are recorded separately.
+
+Use `Transfer Cash` to move money between supported cash accounts, such as Charles Schwab `Cash` and Wealthfront `High yield saving`. The app subtracts the amount from the source account, adds it to the destination account, and creates matching transfer records.

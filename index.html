@@ -140,8 +140,10 @@
               <h2 id="entryTitle">Add or Update Holding</h2>
             </div>
 
-            <button id="addNewAsset" type="button" class="icon-button" title="Add new as
-         set">Add New Asset</button>
+            <div class="entry-actions">
+              <button id="addNewAsset" type="button" class="icon-button" title="Add new asset">Add New Asset</button>
+              <button id="transferCashButton" type="button" class="icon-button">Transfer Cash</button>
+            </div>
             </div>
             
             <form id="holdingForm" autocomplete="off">
@@ -210,11 +212,47 @@
             </form>
           </section>
 
+          <section id="transferPanel" class="panel entry-panel hidden" aria-labelledby="transferTitle">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Cash movement</p>
+                <h2 id="transferTitle">Transfer Cash</h2>
+              </div>
+              <button id="closeTransferButton" type="button" class="icon-button">Close</button>
+            </div>
+
+            <form id="transferForm" autocomplete="off">
+              <div class="form-grid">
+                <label>
+                  Month
+                  <input id="transferMonth" type="month" required />
+                </label>
+                <label>
+                  From
+                  <select id="transferFrom" required></select>
+                </label>
+                <label>
+                  To
+                  <select id="transferTo" required></select>
+                </label>
+                <label>
+                  Amount
+                  <input id="transferAmount" type="number" min="0" step="0.01" inputmode="decimal" required />
+                </label>
+              </div>
+              <label>
+                Notes
+                <textarea id="transferNotes" rows="2" placeholder="Optional transfer context"></textarea>
+              </label>
+              <button type="submit" class="primary">Transfer Cash</button>
+            </form>
+          </section>
+
           <section class="panel table-panel" aria-labelledby="tableTitle">
             <div class="panel-heading">
               <div>
                 <p class="eyebrow">Records</p>
-                <h2 id="tableTitle">Monthly Holdings</h2>
+                <h2 id="tableTitle">Activity Records</h2>
               </div>
               <div class="record-filters">
                 <label>
@@ -235,7 +273,7 @@
                 </label>
                 <label class="search-box">
                   Search
-                  <input id="search" type="search" placeholder="Notes, value type, status" />
+                  <input id="search" type="search" placeholder="Action, account, ticker, notes" />
                 </label>
               </div>
             </div>
@@ -244,15 +282,14 @@
                 <thead>
                   <tr>
                     <th>Month</th>
+                    <th>Entry Time</th>
+                    <th>Action</th>
                     <th>Institution</th>
                     <th>Category</th>
                     <th>Ticker/Product</th>
-                    <th class="number">Current Value</th>
-                    <th>Value Type</th>
-                    <th>Matured/Sold</th>
-                    <th class="number">Cost Basis</th>
+                    <th class="number">Amount</th>
+                    <th class="number">Cash Delta</th>
                     <th>Notes</th>
-                    <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody id="holdingsTable"></tbody>
